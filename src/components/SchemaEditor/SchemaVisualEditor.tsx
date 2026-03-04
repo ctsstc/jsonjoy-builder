@@ -19,6 +19,7 @@ export interface SchemaVisualEditorProps {
   schema: JSONSchema;
   readOnly: boolean;
   onChange: (schema: JSONSchema) => void;
+  onFieldDrop?: (source: FieldMoveLocation, target: FieldDropTarget) => void;
 }
 
 /** @public */
@@ -26,98 +27,59 @@ const SchemaVisualEditor: FC<SchemaVisualEditorProps> = ({
   schema,
   onChange,
   readOnly = false,
+  onFieldDrop,
 }) => {
   const t = useTranslation();
-  // Handle adding a top-level field
-  const handleAddField = (newField: NewField) => {
-    // Create a field schema based on the new field data
-    const fieldSchema = createFieldSchema(newField);
 
-    // Add the field to the schema
+  const handleAddField = (newField: NewField) => {
+    const fieldSchema = createFieldSchema(newField);
     let newSchema = updateObjectProperty(
       asObjectSchema(schema),
       newField.name,
       fieldSchema,
     );
-
-    // Update required status if needed
     if (newField.required) {
       newSchema = updatePropertyRequired(newSchema, newField.name, true);
     }
-
-    // Update the schema
     onChange(newSchema);
   };
 
-  // Handle editing a top-level field
   const handleEditField = (name: string, updatedField: NewField) => {
-    // Create a field schema based on the updated field data
     const fieldSchema = createFieldSchema(updatedField);
-
     let newSchema = asObjectSchema(schema);
-
-    // If name changed, rename the property while preserving order
     if (name !== updatedField.name) {
       newSchema = renameObjectProperty(newSchema, name, updatedField.name);
-      // Update the field schema after rename
-      newSchema = updateObjectProperty(
-        newSchema,
-        updatedField.name,
-        fieldSchema,
-      );
+      newSchema = updateObjectProperty(newSchema, updatedField.name, fieldSchema);
     } else {
-      // Name didn't change, just update the schema
       newSchema = updateObjectProperty(newSchema, name, fieldSchema);
     }
-
-    // Update required status
     newSchema = updatePropertyRequired(
       newSchema,
       updatedField.name,
       updatedField.required || false,
     );
-
-    // Update the schema
     onChange(newSchema);
   };
 
-  // Handle deleting a top-level field
   const handleDeleteField = (name: string) => {
-    // Check if the schema is valid first
-    if (isBooleanSchema(schema) || !schema.properties) {
-      return;
-    }
-
-    // Create a new schema without the field
+    if (isBooleanSchema(schema) || !schema.properties) return;
     const { [name]: _, ...remainingProps } = schema.properties;
-
-    const newSchema = {
-      ...schema,
-      properties: remainingProps,
-    };
-
-    // Remove from required array if present
+    const newSchema = { ...schema, properties: remainingProps };
     if (newSchema.required) {
-      newSchema.required = newSchema.required.filter((field) => field !== name);
+      newSchema.required = newSchema.required.filter((f) => f !== name);
     }
-
-    // Update the schema
     onChange(newSchema);
+  };
+
+  const handleFieldDrop = (source: FieldMoveLocation, target: FieldDropTarget) => {
+    const updated = moveFieldInSchema(schema, source, target);
+    onChange(updated);
   };
 
   const hasFields =
     !isBooleanSchema(schema) &&
     schema.properties &&
     Object.keys(schema.properties).length > 0;
-
-  const handleFieldDrop = (
-    source: FieldMoveLocation,
-    target: FieldDropTarget,
-  ) => {
-    if (!onChange) return;
-    const updated = moveFieldInSchema(schema, source, target);
-    onChange(updated);
-  };
 
   return (
     <div className="p-4 h-full flex flex-col overflow-auto jsonjoy">
@@ -140,7 +102,7 @@ const SchemaVisualEditor: FC<SchemaVisualEditorProps> = ({
             onEditField={handleEditField}
             onDeleteField={handleDeleteField}
             parentPath={[]}
-            onFieldDrop={handleFieldDrop}
+            onFieldDrop={onFieldDrop ?? handleFieldDrop}
           />
         )}
       </div>

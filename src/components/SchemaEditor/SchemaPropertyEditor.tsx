@@ -1,5 +1,8 @@
+import { useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { ChevronDown, ChevronRight, GripVertical, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useDragState } from "./DragStateContext.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { useTranslation } from "../../hooks/use-translation.ts";
 import type {
@@ -23,29 +26,6 @@ import { ButtonToggle } from "../ui/button-toggle.tsx";
 import TypeDropdown from "./TypeDropdown.tsx";
 import TypeEditor from "./TypeEditor.tsx";
 
-interface DropIndicatorProps {
-  onDrop: (e: React.DragEvent) => void;
-  position: "top" | "bottom";
-}
-
-const DropIndicator: React.FC<DropIndicatorProps> = ({ onDrop, position }) => (
-  <div
-    role="presentation"
-    aria-hidden="true"
-    className={cn(
-      "pointer-events-auto absolute left-0 right-0 h-3 flex items-center justify-center",
-      position === "top" ? "-top-2.5" : "-bottom-2.5",
-    )}
-    onDragOver={(e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-    }}
-    onDrop={onDrop}
-  >
-    <div className="w-full h-0 border-t-2 border-primary rounded-none" />
-  </div>
-);
-
 export interface SchemaPropertyEditorProps {
   name: string;
   schema: JSONSchema;
@@ -61,18 +41,16 @@ export interface SchemaPropertyEditorProps {
    */
   parentPath: string[];
   depth?: number;
-  onDragStart?: (e: React.DragEvent, name: string) => void;
-  onDragOver?: (e: React.DragEvent, name: string) => void;
-  onDrop?: (e: React.DragEvent, targetName: string) => void;
-  onDragEnd?: () => void;
-  isDragging?: boolean;
-  isDragOver?: boolean;
-  dropPosition?: "top" | "bottom" | null;
   /**
    * Centralized field drop handler, forwarded down to nested editors so
    * they can report drag-and-drop operations back to the visual editor.
    */
   onFieldDrop?: (source: FieldMoveLocation, target: FieldDropTarget) => void;
+  /**
+   * When true, the component is rendered inside DragOverlay (ghost clone).
+   * In this mode useSortable is skipped and no drag interactions are set up.
+   */
+  isOverlay?: boolean;
 }
 
 export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
@@ -87,14 +65,8 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
   onSchemaChange,
   parentPath,
   depth = 0,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
-  isDragging = false,
-  isDragOver = false,
-  dropPosition = null,
   onFieldDrop,
+  isOverlay = false,
 }) => {
   const t = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -102,50 +74,50 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
   const [isEditingDesc, setIsEditingDesc] = useState(false);
   const [tempName, setTempName] = useState(name);
   const [tempDesc, setTempDesc] = useState(getSchemaDescription(schema));
+
   const type = withObjectSchema(
     schema,
     (s) => (s.type || "object") as SchemaType,
     "object" as SchemaType,
   );
 
+  // Unique sortable ID: parentPath joined + field name
+  const sortableId = [...parentPath, name].join("/") || name;
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: sortableId,
+    disabled: readOnly || isOverlay,
+    data: {
+      parentPath,
+      name,
+      propertySchema: schema,
+      required,
+    },
+  });
+
+  // When this item is being dragged, the DragOverlay follows the cursor.
+  // Don't apply the sortable transform to the original element — it should
+  // stay put as a faded placeholder, not teleport to a new position.
+  const style = {
+    transform: isDragging ? undefined : CSS.Transform.toString(transform),
+    transition: isDragging ? undefined : transition,
+  };
+
+  const { overId, overPosition } = useDragState();
+  const isDropTarget = !isOverlay && overId === sortableId;
+
   // Update temp values when props change
   useEffect(() => {
     setTempName(name);
     setTempDesc(getSchemaDescription(schema));
   }, [name, schema]);
-
-  // Handle drag start
-  const handleDragStart = (e: React.DragEvent) => {
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", name);
-    onDragStart?.(e, name);
-  };
-
-  // Handle drag over
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    // Prevent parent containers or ancestor field editors from also handling
-    // this drag-over event. Only the innermost field under the cursor should
-    // control drag state (drop indicators, dragOverItem, etc.).
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = "move";
-    onDragOver?.(e, name);
-  };
-
-  // Handle drop
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    // Ensure only the intended container/field processes this drop.
-    // Without this, ancestor field editors (e.g. top-level fields) would
-    // also run their drop logic, causing duplicates at higher levels.
-    e.stopPropagation();
-    onDrop?.(e, name);
-  };
-
-  // Handle drag end
-  const handleDragEnd = () => {
-    onDragEnd?.();
-  };
 
   const handleNameSubmit = () => {
     const trimmedName = tempName.trim();
@@ -170,7 +142,6 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
     setIsEditingDesc(false);
   };
 
-  // Handle schema changes, preserving description
   const handleSchemaUpdate = (updatedSchema: ObjectJSONSchema) => {
     const description = getSchemaDescription(schema);
     onSchemaChange({
@@ -180,21 +151,17 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
   };
 
   return (
-    <div className="relative">
-      {/* Drop indicator above the item */}
-      {isDragOver && dropPosition === "top" && (
-        <DropIndicator position="top" onDrop={handleDrop} />
+    <div ref={setNodeRef} style={style} className="relative">
+      {isDropTarget && overPosition === "top" && (
+        <div className="absolute left-0 right-0 -top-1 h-0.5 bg-primary rounded-full z-10 pointer-events-none" />
       )}
-
       <fieldset
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-        onDragEnd={handleDragEnd}
         className={cn(
           "mb-2 animate-in rounded-lg border transition-all duration-200",
           depth > 0 && "ml-0 sm:ml-4 border-l border-l-border/40",
           isDragging && "opacity-50",
-          isDragOver && "border-primary ring-2 ring-primary/20",
+          isOverlay && "shadow-lg ring-2 ring-primary/30 bg-background",
+          isDropTarget && "border-primary ring-2 ring-primary/20",
         )}
       >
         <div className="relative json-field-row justify-between group">
@@ -204,9 +171,9 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
               <button
                 type="button"
                 aria-label="Drag to reorder field"
-                draggable
-                onDragStart={handleDragStart}
                 className="cursor-grab active:cursor-grabbing text-foreground transition-colors p-1 rounded hover:bg-secondary/50"
+                {...attributes}
+                {...listeners}
               >
                 <GripVertical size={16} />
               </button>
@@ -343,7 +310,7 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
         </div>
 
         {/* Type-specific editor */}
-        {expanded && (
+        {expanded && !isOverlay && (
           <div className="pt-1 pb-2 px-2 sm:px-3 animate-in">
             {readOnly && tempDesc && <p className="pb-2">{tempDesc}</p>}
             <TypeEditor
@@ -358,9 +325,8 @@ export const SchemaPropertyEditor: React.FC<SchemaPropertyEditorProps> = ({
           </div>
         )}
       </fieldset>
-      {/* Drop indicator below the item */}
-      {isDragOver && dropPosition === "bottom" && (
-        <DropIndicator position="bottom" onDrop={handleDrop} />
+      {isDropTarget && overPosition === "bottom" && (
+        <div className="absolute left-0 right-0 -bottom-1 h-0.5 bg-primary rounded-full z-10 pointer-events-none" />
       )}
     </div>
   );
